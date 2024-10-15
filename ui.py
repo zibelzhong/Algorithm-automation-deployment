@@ -1,3 +1,5 @@
+import time
+
 import paramiko
 import os
 from tkinter import ttk
@@ -87,6 +89,7 @@ def deploy_algorithm_to_server(host, port, username, password, local_file_path, 
                 local_file_path_temp = os.path.join(root_root, file).replace(os.path.sep, '/')
                 remote_file_path = os.path.join(sftp.getcwd(), file).replace(os.path.sep, '/')
                 sftp.put(local_file_path_temp, remote_file_path)
+        log_text.insert(tk.END, "算法部署完成\n")
 
     except Exception as e:
         log_text.insert(tk.END, f"发生错误: {e}\n")
@@ -122,7 +125,6 @@ def start_algorithm_service_impl(host, port, username, password, remote_dir, scr
     :param username:
     :param password:
     :param remote_dir:
-
     :param config_file:算法运行的配置文件
     :param script_name: #运行算法启动的脚本
     :return:
@@ -133,19 +135,8 @@ def start_algorithm_service_impl(host, port, username, password, remote_dir, scr
     try:
         # 连接到远程服务器
         ssh.connect(host, port, username, password)
-        # 更改当前工作目录
-        stdin, stdout, stderr= ssh.exec_command(f"cd {remote_dir}&{script_name}")
-        stdout_content = stdout.read().decode('utf-8')
-        print(stdout_content)
-        stderr_content = stderr.read().decode('utf-8')
-        print(stderr_content)
-
-        stdin, stdout, stderr = ssh.exec_command(f" {script_name}")  # 输出执行结果  todo 启动命令没有成功
-        stdout_content = stdout.read().decode('utf-8')
-        print(stdout_content)
-        stderr_content = stderr.read().decode('utf-8')
-        print(stderr_content)
-
+        # # 使用 -i 参数强制使用交互式 shell,算法启动命令
+        stdin, stdout, stderr = ssh.exec_command(f"bash -i -c 'source ~/.bashrc && cd {remote_dir} && {script_name}'")
         log_text.insert(tk.END, "启动服务结果:\n")
         # 运行的日志打印到ui界面上
         # 获取日志的名称
@@ -163,18 +154,14 @@ def start_algorithm_service_impl(host, port, username, password, remote_dir, scr
             # 打开SFTP会话
             sftp = ssh.open_sftp()
             # 读取文件内容
-            with sftp.file(log_path_server, 'r') as file:
-                log_content = file.read().decode('utf-8')
-                # 对日志文件进行截取
-                get_latest_log_content(log_content, log_text)
-        errors = stderr.read().decode('utf-8')
-        if errors:
-            log_text.insert(tk.END, f"{errors}\n")
-            log_text.insert(tk.END, "算法服务失败。\n")
-            log_text.see(tk.END)  # 滚动到底部
-        else:
-            log_text.insert(tk.END, "算法服务启动完成。\n")
-            log_text.see(tk.END)  # 滚动到底部
+            time.sleep(2)
+            try:
+                with sftp.file(log_path_server, 'r') as file:
+                    log_content = file.read().decode('utf-8')
+                    # 对日志文件进行截取
+                    get_latest_log_content(log_content, log_text)
+            except Exception as e:
+                log_text.insert(tk.END, "没有部署运行日志文件\n")
     except Exception as e:
         log_text.insert(tk.END, f"发生错误: {e}\n")
     finally:
@@ -222,6 +209,17 @@ def get_latest_log_content(log_file_path, log_text):
         filter_log = logs[min(filtered_logs_index):]
         for log in filter_log:
             log_text.insert(tk.END, f"{log}\n")
+            log_text.see(tk.END)  # 滚动到底部
+        # 对结果进行判断
+        last_open_bracket_index = filter_log[-2].rfind('[')
+        last_close_bracket_index = filter_log[-2].rfind(']')
+        # 提取最后一个方括号内的内容
+        last_bracket_content = filter_log[-2][last_open_bracket_index + 1:last_close_bracket_index]
+        if last_bracket_content == "ERROR":
+            log_text.insert(tk.END, "算法启动失败\n")
+            log_text.see(tk.END)  # 滚动到底部
+        else:
+            log_text.insert(tk.END, "算法启动成功\n")
             log_text.see(tk.END)  # 滚动到底部
 
 
@@ -302,7 +300,7 @@ def stop_algorithm_service_impl(host, port, username, password, remote_dir, conf
         # 解析算法运行日志
         flag, pids = parse_log(log_content)
         if not flag:
-            log_text.insert(tk.END, "算法没有启动，无法停止算法\n")
+            log_text.insert(tk.END, "算法没有启动，无需停止算法\n")
             log_text.see(tk.END)  # 滚动到底部
         else:
             for pid in pids:
@@ -331,8 +329,7 @@ def parse_log(log_content):
         flag = False
         pids = []
     else:
-        log_lines = log_content.strip().split('\n')
-        latest_log, latest_time = find_latest_log(log_lines)
+        latest_log, latest_time = find_latest_log(log_content)
         # 判断算法是否运行成功
         # 找到最后一个方括号的位置
         last_open_bracket_index = latest_log[-1].rfind('[')
@@ -367,19 +364,25 @@ def find_latest_log(logs):
     :param logs:
     :return:
     """
+    logs = logs.strip().split('\n')
     latest_log = []
     latest_time = None
     for log in logs:
         # 获取日志最新时间
-        log_time = parse_log_time(log)
-        if latest_time is None or log_time >= latest_time:
-            latest_time = log_time  # 日志更新最新的时间
-
+        log_time, flag = parse_log_time(log)
+        if not flag:  # 没有时间
+            continue
+        else:
+            if latest_time is None or ((log_time >= latest_time) & (log_time is not None)):
+                latest_time = log_time  # 日志更新最新的时间
     #  获取最新时间对应的日志内容
     for log in logs:
-        log_time = parse_log_time(log)
-        if latest_time is None or log_time >= latest_time:
-            latest_log.append(log)
+        log_time, flag = parse_log_time(log)
+        if not flag:  # 没有时间
+            continue
+        else:
+            if latest_time is None or ((log_time >= latest_time) & (log_time is not None)):
+                latest_log.append(log)
 
     return latest_log, latest_time
 
@@ -390,11 +393,18 @@ def parse_log_time(log_line):
     :param log_line:Q
     :return:
     """
-    from datetime import datetime
     time_str = log_line.split(']')[0][1:]
-    time_obj = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S %z')
-    time_obj_minute = time_obj.replace(second=0, microsecond=0)  # 提取时间字符串
-    return time_obj_minute.strftime('%Y-%m-%d %H:%M %z')  # 解析时间字符串
+    log_time_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+    match = re.search(log_time_pattern, time_str)
+    if match:
+        time_obj = datetime.strptime(match.group(), '%Y-%m-%d %H:%M:%S')
+        time_obj_minute = time_obj.replace(second=0, microsecond=0)  # 提取时间字符串
+        time_obj_minute = time_obj_minute.strftime('%Y-%m-%d %H:%M %z')
+        flag = True
+    else:
+        time_obj_minute = None
+        flag = False
+    return time_obj_minute, flag  # 解析时间字符串
 
 
 if __name__ == '__main__':
@@ -488,7 +498,7 @@ if __name__ == '__main__':
     # 配置滚动条
     scrollbar.config(command=log_text.yview)
     # 添加一句话
-    label_message = tk.Label(root, text="如有问题请联系xxxx，电话：xxxxx", font=("仿宋", 12))
+    label_message = tk.Label(root, text="如有问题请联系仲昭林，电话：18325517516", font=("仿宋", 12))
     label_message.pack(pady=10)
     # 运行主循环
     root.mainloop()
